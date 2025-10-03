@@ -1,0 +1,7 @@
+streamlit
+geopandas
+shapely
+pyproj
+plotly
+rtree
+pandas
