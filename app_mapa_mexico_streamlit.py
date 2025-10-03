@@ -8,16 +8,36 @@ import streamlit as st
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import unary_union
 
+# # -------------------------------
+# # Configuración básica
+# # -------------------------------
+# st.set_page_config(page_title="Mapa de México (Estados y Municipios)", layout="wide")
+# st.title("Mapa interactivo de México: Estados y Municipios")
+# st.caption("Selecciona un estado y un municipio para resaltarlos en el mapa. Coloca los GeoJSON en ./data o usa tus propios archivos en la barra lateral.")
+
+# DATA_DIR = Path("data")
+# ESTADOS_FILE_DEFAULT = DATA_DIR / "mx_estados.geojson"
+# MUNS_FILE_DEFAULT = DATA_DIR / "mx_municipios.geojson"
+
 # -------------------------------
 # Configuración básica
 # -------------------------------
 st.set_page_config(page_title="Mapa de México (Estados y Municipios)", layout="wide")
 st.title("Mapa interactivo de México: Estados y Municipios")
-st.caption("Selecciona un estado y un municipio para resaltarlos en el mapa. Coloca los GeoJSON en ./data o usa tus propios archivos en la barra lateral.")
+st.caption("Selecciona un estado y un municipio para resaltarlos en el mapa. Coloca los GeoJSON en ./data (se aceptan nombres: 'mx_estados.geojson'/'mx_municipios.geojson' o 'states.geojson'/'municipalities.geojson') o súbelos en la barra lateral.")
+
 
 DATA_DIR = Path("data")
-ESTADOS_FILE_DEFAULT = DATA_DIR / "mx_estados.geojson"
-MUNS_FILE_DEFAULT = DATA_DIR / "mx_municipios.geojson"
+# Acepta nombres comunes: mx_estados.geojson / mx_municipios.geojson o states.geojson / municipalities.geojson
+ESTADOS_CANDIDATES = [
+DATA_DIR / "mx_estados.geojson",
+DATA_DIR / "states.geojson",
+]
+MUNS_CANDIDATES = [
+DATA_DIR / "mx_municipios.geojson",
+DATA_DIR / "municipalities.geojson",
+]
+
 
 # -------------------------------
 # Utilidades
