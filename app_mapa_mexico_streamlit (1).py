@@ -34,35 +34,40 @@ def fc_bounds(fc):
         found=True
     return (minx,miny,maxx,maxy) if found else None
 
-# --- Asegurar ids para plotly.locations ---
-for i, feat in enumerate(gj.get("features", [])):
+# --- Asignar id y texto por-feature ---
+features = gj.get("features", [])
+for i, feat in enumerate(features):
     feat["id"] = str(i)
+    props = feat.get("properties", {}) or {}
+    ent = str(props.get("NOM_ENT", "") or "")
+    mun = str(props.get("NOMGEO", "") or "")
+    # Guardar un tooltip listo
+    props["_text"] = f"{ent} — {mun}" if mun else ent
 
-# --- Lista de municipios (NOMGEO) ---
-mun_names = []
-for feat in gj.get("features", []):
-    name = feat.get("properties", {}).get("NOMGEO")
-    if isinstance(name, str):
-        mun_names.append(name)
-mun_names = sorted(set(mun_names))
+all_ids  = [f["id"] for f in features]
+all_text = [f.get("properties", {}).get("_text", "") for f in features]
 
-# --- UI mínima: selector en la barra lateral ---
+# --- Lista de municipios para el selector ---
+mun_names = sorted({(f.get("properties", {}) or {}).get("NOMGEO", "") for f in features if isinstance((f.get("properties", {}) or {}).get("NOMGEO", ""), str)})
+if not mun_names:
+    mun_names = ["(sin municipios)"]
+
+# --- UI mínima ---
 st.title("Aguascalientes: municipios (interactivo mínimo)")
 mun_sel = st.sidebar.selectbox("Municipio", options=mun_names, index=0)
 op_base = st.sidebar.slider("Opacidad base", 0.10, 1.00, 0.35, 0.05)
 op_sel  = st.sidebar.slider("Opacidad municipio", 0.10, 1.00, 0.70, 0.05)
 
-# --- ids base y features seleccionadas ---
-all_ids = [feat["id"] for feat in gj.get("features", [])]
+# --- Filtrar features del municipio seleccionado ---
+sel_features = []
+for f in features:
+    if (f.get("properties", {}) or {}).get("NOMGEO") == mun_sel:
+        sel_features.append(f)
 
-sel_ids = []
-sel_fc = {"type": "FeatureCollection", "features": []}
-for feat in gj.get("features", []):
-    if feat.get("properties", {}).get("NOMGEO") == mun_sel:
-        sel_ids.append(feat["id"])
-        sel_fc["features"].append(feat)
+sel_ids  = [f["id"] for f in sel_features]
+sel_text = [f.get("properties", {}).get("_text", "") for f in sel_features]
 
-# --- centro y zoom (auto por bounds del estado; si quieres, zoom al municipio) ---
+# --- Centro y zoom ---
 b_state = fc_bounds(gj)
 if b_state:
     minx,miny,maxx,maxy = b_state
@@ -75,10 +80,9 @@ if b_state:
 else:
     cx, cy, zoom_state = -102.3, 22.0, 6.0
 
-# Si quieres auto-zoom al municipio seleccionado, cambia a True
 AUTO_ZOOM_MUNICIPIO = True
-if AUTO_ZOOM_MUNICIPIO and sel_fc["features"]:
-    b_sel = fc_bounds(sel_fc)
+if AUTO_ZOOM_MUNICIPIO and sel_features:
+    b_sel = fc_bounds({"type": "FeatureCollection", "features": sel_features})
     if b_sel:
         sx0, sy0, sx1, sy1 = b_sel
         cx, cy = (sx0+sx1)/2.0, (sy0+sy1)/2.0
@@ -99,21 +103,23 @@ fig.add_trace(
         showscale=False,
         opacity=op_base,
         name="Municipios",
-        hovertemplate="<b>%{properties.NOM_ENT}</b><br>%{properties.NOMGEO}<extra></extra>",
+        text=all_text,                           # usamos 'text'…
+        hovertemplate="%{text}<extra></extra>",  # …y lo mostramos aquí
     )
 )
 
 if sel_ids:
     fig.add_trace(
         go.Choroplethmapbox(
-            geojson=sel_fc,
+            geojson={"type": "FeatureCollection", "features": sel_features},
             locations=sel_ids,
             z=[1.0]*len(sel_ids),
             colorscale=[[0,"royalblue"],[1,"royalblue"]],
             showscale=False,
             opacity=op_sel,
             name=str(mun_sel),
-            hovertemplate="<b>%{properties.NOM_ENT}</b><br>%{properties.NOMGEO}<extra></extra>",
+            text=sel_text,
+            hovertemplate="%{text}<extra></extra>",
         )
     )
 
