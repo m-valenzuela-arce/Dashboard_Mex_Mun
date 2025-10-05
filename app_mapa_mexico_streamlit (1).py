@@ -236,6 +236,28 @@ with left:
     centroid = gdf_muni_sel.geometry.unary_union.centroid if not gdf_muni_sel.empty else gdf_estado_sel.geometry.unary_union.centroid
     center = {"lat": centroid.y, "lon": centroid.x}
 
+        # Preparar identificadores estables para Plotly (featureidkey)
+    def as_str(s):
+        try:
+            return s.astype("Int64").astype(str)
+        except Exception:
+            return s.astype(str)
+
+    gdf_muns_in = gdf_muns_in.copy()
+    gdf_muni_sel = gdf_muni_sel.copy()
+
+    # loc_id = state_code-mun_code (único por municipio en todo MX)
+    if "state_code" in gdf_muns_in.columns and "mun_code" in gdf_muns_in.columns:
+        gdf_muns_in["loc_id"] = as_str(gdf_muns_in["state_code"]) + "-" + as_str(gdf_muns_in["mun_code"]) 
+    else:
+        # fallback: usa índice (menos robusto)
+        gdf_muns_in["loc_id"] = gdf_muns_in.index.astype(str)
+
+    if "state_code" in gdf_muni_sel.columns and "mun_code" in gdf_muni_sel.columns:
+        gdf_muni_sel["loc_id"] = as_str(gdf_muni_sel["state_code"]) + "-" + as_str(gdf_muni_sel["mun_code"]) 
+    else:
+        gdf_muni_sel["loc_id"] = gdf_muni_sel.index.astype(str)
+
     # GeoJSON (municipios del estado)
     gj_muns = json.loads(gdf_muns_in.to_json())
     gj_muni_sel = json.loads(gdf_muni_sel.to_json())
@@ -245,8 +267,9 @@ with left:
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=gj_muns,
-            locations=list(range(len(gdf_muns_in))),
+            locations=gdf_muns_in["loc_id"],
             z=[1] * len(gdf_muns_in),
+            featureidkey="properties.loc_id",
             colorscale=[[0, "#e6e6e6"], [1, "#e6e6e6"]],
             marker_line_width=0.5,
             marker_line_color="#a3a3a3",
@@ -261,9 +284,10 @@ with left:
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=gj_muni_sel,
-            locations=list(range(len(gdf_muni_sel))),
+            locations=gdf_muni_sel["loc_id"],
             z=[1] * len(gdf_muni_sel),
-            colorscale=[[0, "#ffcc00"], [1, "#ffcc00"]],  # amarillo
+            featureidkey="properties.loc_id",
+            colorscale=[[0, "#ffcc00"], [1, "#ffcc00"]],
             marker_line_width=muni_line_width,
             marker_line_color="#000000",
             showscale=False,
