@@ -1,293 +1,341 @@
-# app_mapa_mexico_estados_municipios.py
-# Streamlit + Plotly para mapa interactivo de México por estado (archivos por estado)
-# Coloca en ./data los archivos GeoJSON por estado con extensión .json (uno por estado):
-#   Aguascalientes.json, Baja California.json, ... , Yucatán.json, Zacatecas.json
-# El contenido puede llamarse .json aunque sea GeoJSON válido (FeatureCollection).
-#
-# Requisitos:
-#   pip install streamlit plotly geopandas shapely pyproj
-#
-# Ejecuta:
-#   streamlit run app_mapa_mexico_estados_municipios.py
-
+# app_mapa_mexico.py
+# Streamlit: Estados y Municipios (MX) con contorno de estado vía Scattermapbox
 import json
 import os
 import unicodedata
-from pathlib import Path
-
-import geopandas as gpd
-import plotly.graph_objects as go
 import streamlit as st
+import geopandas as gpd
+from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
+import plotly.graph_objects as go
 
-# ---------- Configuración básica ----------
-st.set_page_config(page_title="Mapa Estados y Municipios (MX)", layout="wide")
+# ---------------------------
+# Utilidades de nombres/paths
+# ---------------------------
+DATA_DIR = "data"
 
-st.title("Mapa interactivo de México: Estados y Municipios (archivos por estado)")
-st.caption("Coloca tus archivos por estado (GeoJSON en formato .json) dentro de la carpeta `./data`.")
-
-DATA_DIR = Path("data")
-
-# ---------- Utilidades ----------
-
-@st.cache_data(show_spinner=False)
-def listar_archivos_estado(data_dir: Path):
-    """Devuelve dict {nombre_base_sin_ext: ruta} para todos los .json en data_dir."""
-    archivos = {}
-    if data_dir.exists():
-        for p in data_dir.glob("*.json"):
-            archivos[p.stem] = p
-    return archivos
-
-def normalizar(s: str) -> str:
-    """Normaliza texto para comparaciones robustas (quita acentos/espacios extras, minúsculas)."""
+def slug(s: str) -> str:
+    if s is None:
+        return ""
+    s = s.strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
-    return " ".join(s.lower().split())
+    # normaliza espacios y puntos
+    s = s.replace(".", " ")
+    while "  " in s:
+        s = s.replace("  ", " ")
+    return s
 
-# Mapeo de nombres “comunes” -> nombre real del archivo (sin .json)
-# Lo que pediste: usar estos nombres cortos en el selector.
-NOMBRE_COMUN_A_ARCHIVO = {
-    "estado de mexico": "México",
-    "veracruz": "Veracruz de Ignacio de la Llave",
-    "michoacan": "Michoacán de Ocampo",
-    "ciudad de mexico": "Ciudad de México",
-    "coahuila": "Coahuila de Zaragoza",
+# Mapeos “comunes” -> “oficial” y variantes de archivo
+NOMBRES_CANON = {
+    "aguascalientes":"Aguascalientes",
+    "baja california":"Baja California",
+    "baja california sur":"Baja California Sur",
+    "campeche":"Campeche",
+    "chiapas":"Chiapas",
+    "chihuahua":"Chihuahua",
+    "ciudad de mexico":"Ciudad de México",
+    "cdmx":"Ciudad de México",
+    "coahuila":"Coahuila de Zaragoza",
+    "coahuila de zaragoza":"Coahuila de Zaragoza",
+    "colima":"Colima",
+    "durango":"Durango",
+    "guanajuato":"Guanajuato",
+    "guerrero":"Guerrero",
+    "hidalgo":"Hidalgo",
+    "jalisco":"Jalisco",
+    "mexico":"México",                    # << Estado de México
+    "estado de mexico":"México",         # alias
+    "michoacan":"Michoacán de Ocampo",
+    "michoacan de ocampo":"Michoacán de Ocampo",
+    "morelos":"Morelos",
+    "nayarit":"Nayarit",
+    "nuevo leon":"Nuevo León",
+    "oaxaca":"Oaxaca",
+    "puebla":"Puebla",
+    "queretaro":"Querétaro",
+    "quintana roo":"Quintana Roo",
+    "san luis potosi":"San Luis Potosí",
+    "sinaloa":"Sinaloa",
+    "sonora":"Sonora",
+    "tabasco":"Tabasco",
+    "tamaulipas":"Tamaulipas",
+    "tlaxcala":"Tlaxcala",
+    "veracruz":"Veracruz de Ignacio de la Llave",
+    "veracruz de ignacio de la llave":"Veracruz de Ignacio de la Llave",
+    "yucatan":"Yucatán",
+    "zacatecas":"Zacatecas",
 }
 
-# ---------- Carga de datos por estado ----------
+# Candidatos de nombres de archivos por estado (con acentos o sin acentos)
+def candidates_for_state(canon_name: str):
+    base = canon_name
+    simples = slug(canon_name).title()  # p.ej. "Veracruz De Ignacio De La Llave"
+    # variantes directas
+    files = [
+        f"{canon_name}.geojson",
+        f"{canon_name}.json",
+        f"{simples}.geojson",
+        f"{simples}.json",
+    ]
+    # algunos alias más frecuentes
+    alias = {
+        "México": ["Mexico.geojson","Mexico.json","Estado de México.geojson","Estado de México.json",
+                   "Estado de Mexico.geojson","Estado de Mexico.json","México.geojson","México.json"],
+        "Michoacán de Ocampo": ["Michoacan de Ocampo.geojson","Michoacan de Ocampo.json","Michoacán.geojson","Michoacán.json","Michoacan.geojson","Michoacan.json"],
+        "Veracruz de Ignacio de la Llave":["Veracruz.geojson","Veracruz.json"],
+        "Coahuila de Zaragoza": ["Coahuila.geojson","Coahuila.json"],
+        "Ciudad de México": ["CDMX.geojson","CDMX.json","Ciudad de Mexico.geojson","Ciudad de Mexico.json"],
+        "Nuevo León": ["Nuevo Leon.geojson","Nuevo Leon.json"],
+        "Querétaro": ["Queretaro.geojson","Queretaro.json"],
+        "Yucatán": ["Yucatan.geojson","Yucatan.json"],
+        "San Luis Potosí": ["San Luis Potosi.geojson","San Luis Potosi.json"],
+        "Quintana Roo": ["QuintanaRoo.geojson","QuintanaRoo.json"],
+    }
+    files.extend(alias.get(canon_name, []))
+    # asegura únicos
+    seen, out = set(), []
+    for f in files:
+        if f not in seen:
+            seen.add(f); out.append(f)
+    return out
 
-@st.cache_data(show_spinner=True)
-def cargar_municipios_estado(path_json: Path) -> gpd.GeoDataFrame:
-    """
-    Carga un GeoJSON (aunque su extensión sea .json) de municipios de un estado.
-    Asegura que existan columnas estandarizadas:
-      - 'mun_name' para el nombre del municipio
-      - 'mun_code' si existe código
-    Añade 'mun_id' (índice entero) para enlazar con Plotly.
-    """
-    # Algunos archivos pueden fallar con fiona si tienen CRSs raros; gpd.read_file suele manejarlo bien.
-    gdf = gpd.read_file(path_json)
+def find_state_file(canon_name: str):
+    # busca en DATA_DIR con todas las variantes (resistente a acentos/espacios)
+    cands = candidates_for_state(canon_name)
+    # además inspecciona la carpeta y matchea por slug del stem
+    all_files = [f for f in os.listdir(DATA_DIR) if f.lower().endswith((".geojson",".json"))]
+    # primero: coincidencias exactas de los candidatos
+    for f in cands:
+        if f in all_files:
+            return os.path.join(DATA_DIR, f)
+    # segundo: por slug de nombre canónico vs slug de filename
+    target = slug(canon_name)
+    for f in all_files:
+        stem = os.path.splitext(f)[0]
+        if slug(stem) == target:
+            return os.path.join(DATA_DIR, f)
+    # tercero: heurística: archivo cuyo stem contenga el canónico
+    for f in all_files:
+        stem = slug(os.path.splitext(f)[0])
+        if target in stem:
+            return os.path.join(DATA_DIR, f)
+    return None
 
-    # Detectar nombre de columna de municipio
-    posibles_nombres = ["NOMGEO", "mun_name", "NOM_MUN", "NOM_MPIO", "NOMBRE", "name"]
-    mun_col = None
-    for c in posibles_nombres:
-        if c in gdf.columns:
-            mun_col = c
-            break
-    if mun_col is None:
-        # Si no encontramos, crea una genérica
-        gdf["mun_name"] = gdf.index.astype(str)
-        mun_col = "mun_name"
-    else:
-        if mun_col != "mun_name":
-            gdf = gdf.rename(columns={mun_col: "mun_name"})
-
-    # Código de municipio (si existe)
-    posibles_cod = ["CVEGEO", "CVE_MUN", "clave", "code", "MUN", "MUN_CODE", "CVE_MPIO"]
-    for c in posibles_cod:
-        if c in gdf.columns:
-            gdf = gdf.rename(columns={c: "mun_code"})
-            break
-    if "mun_code" not in gdf.columns:
-        gdf["mun_code"] = None
-
-    # Asegurar CRS WGS84
-    try:
-        if gdf.crs is None:
-            # Asumimos WGS84 si viene vacío (muchos archivos de INEGI vienen así pero coords son lon/lat)
-            gdf.set_crs("EPSG:4326", inplace=True)
-        else:
-            gdf = gdf.to_crs("EPSG:4326")
-    except Exception:
-        # Si algo falla, seguimos sin reproyectar
-        pass
-
-    # ID único para plotly featureidkey
-    gdf = gdf.reset_index(drop=True)
-    gdf["mun_id"] = gdf.index.astype(int)
-
+def load_gdf(path: str) -> gpd.GeoDataFrame:
+    # geopandas lee tanto .json como .geojson si son FeatureCollection válidas
+    gdf = gpd.read_file(path)
+    # homogeneiza columnas conocidas
+    cols = [c.lower() for c in gdf.columns]
+    rename = {}
+    for c in gdf.columns:
+        lc = c.lower()
+        if lc in ("nomgeo","mun_name","municipio","name","nombre"):
+            rename[c] = "mun_name"
+        if lc in ("nom_ent","state_name","entidad","estado"):
+            rename[c] = "state_name"
+        if lc in ("cvegeo","mun_id","cve_mun","cve_municipio"):
+            rename[c] = "mun_id"
+        if lc in ("cve_ent","state_code","cve_state","cve_entidad"):
+            rename[c] = "state_code"
+        if lc == "id":
+            rename[c] = "id"
+    if rename:
+        gdf = gdf.rename(columns=rename)
     return gdf
 
-def construir_geojson_from_gdf(gdf: gpd.GeoDataFrame) -> dict:
-    """Convierte el GeoDataFrame a dict GeoJSON con propiedades incluidas."""
-    gj = json.loads(gdf.to_json())
-    return gj
+def _boundary_coords(geom):
+    """Devuelve (lons, lats) con separadores None para Scattermapbox a partir del 'boundary'."""
+    b = geom.boundary
+    lons, lats = [], []
+    def add_line(ls: LineString):
+        xs, ys = ls.xy
+        lons.extend(list(xs)); lats.extend(list(ys))
+        lons.append(None); lats.append(None)
+    if isinstance(b, LineString):
+        add_line(b)
+    elif isinstance(b, MultiLineString):
+        for ls in b.geoms:
+            add_line(ls)
+    else:
+        try:
+            for ls in b:
+                add_line(ls)
+        except Exception:
+            pass
+    if lons and lons[-1] is None:
+        lons.pop(); lats.pop()
+    return lons, lats
 
-# ---------- UI: selección de estado/municipio y estilos ----------
+# ---------------------------
+# UI
+# ---------------------------
+st.set_page_config(page_title="Mapa MX • Estados y Municipios", layout="wide")
+st.title("Mapa interactivo de México: Estados y Municipios")
 
-col_left, col_right = st.columns([1, 3])
+st.caption("Coloca archivos por estado en `./data` (p.ej. `Sonora.json`, `México.geojson`, etc.). "
+           "También puedes incluir un archivo general `municipalities.geojson`.")
 
-with col_left:
-    st.subheader("Selecciona")
+# Descubre estados disponibles según archivos en /data
+disponibles = []
+for key, canon in NOMBRES_CANON.items():
+    p = find_state_file(canon)
+    if p:
+        disponibles.append(canon)
+disponibles = sorted(set(disponibles))
 
-    archivos = listar_archivos_estado(DATA_DIR)
-    if not archivos:
-        st.error("No se encontraron archivos `.json` en `./data`. Coloca los 32 archivos por estado ahí.")
-        st.stop()
+col1, col2, col3, col4 = st.columns([1.2,1.2,1,1])
+with col1:
+    estado_in = st.selectbox(
+        "Selecciona estado",
+        options=disponibles if disponibles else list(NOMBRES_CANON.values()),
+        index=(disponibles.index("Sonora") if "Sonora" in disponibles else 0)
+    )
+canon = NOMBRES_CANON.get(slug(estado_in), estado_in)
 
-    # Construir lista de etiquetas de estados para selector:
-    #   - Si el archivo tiene un nombre mapeado -> mostrar el nombre común.
-    #   - Si no, mostrar el nombre del archivo tal cual (sin ext).
-    etiqueta_a_archivo = {}
-    usados = set()
-    # Primero agrega los mapeados (si existen en el directorio):
-    for comun_norm, archivo_base in NOMBRE_COMUN_A_ARCHIVO.items():
-        # Buscar la clave exacta que haya en archivos (case/acentos correctos):
-        # archivos keys are stems (with proper accents).
-        if archivo_base in archivos:
-            etiqueta = archivo_base  # etiqueta visible por defecto
-            # Cambiamos etiqueta visible al nombre "común" como pediste
-            if comun_norm == "estado de mexico":
-                etiqueta = "Estado de México"
-            elif comun_norm == "veracruz":
-                etiqueta = "Veracruz"
-            elif comun_norm == "michoacan":
-                etiqueta = "Michoacán"
-            elif comun_norm == "ciudad de mexico":
-                etiqueta = "Ciudad de México"
-            elif comun_norm == "coahuila":
-                etiqueta = "Coahuila"
-            etiqueta_a_archivo[etiqueta] = archivos[archivo_base]
-            usados.add(archivo_base)
+with col2:
+    lw_estado = st.slider("Grosor de contorno del estado", 1, 12, 4, 1)
+with col3:
+    lw_mun = st.slider("Grosor del municipio", 1, 12, 3, 1)
+with col4:
+    op_mun = st.slider("Opacidad del municipio", 0.10, 1.00, 0.60, 0.05)
 
-    # Luego agrega el resto de estados tal cual aparezcan
-    for stem, ruta in sorted(archivos.items()):
-        if stem not in usados:
-            etiqueta_a_archivo[stem] = ruta
+# Carga GDF del estado (munis del estado)
+state_path = find_state_file(canon)
+if not state_path:
+    st.error(f"No encontré archivo en `/data` para **{canon}**. "
+             f"Renombra el archivo con el nombre del estado (ej: `{canon}.json`) o coloca un alias.")
+    st.stop()
 
-    opciones_estado = list(etiqueta_a_archivo.keys())
+try:
+    gdf_muns = load_gdf(state_path)
+except Exception as e:
+    st.error(f"Error leyendo `{os.path.basename(state_path)}`: {e}")
+    st.stop()
 
-    estado_sel = st.selectbox("Estado", opciones_estado, index=opciones_estado.index("Sonora") if "Sonora" in opciones_estado else 0)
+if gdf_muns.empty or gdf_muns.geometry.is_empty.all():
+    st.error("El GeoDataFrame del estado está vacío o sin geometría.")
+    st.stop()
 
-    # Cargar municipios del estado seleccionado
-    gdf_muns = cargar_municipios_estado(etiqueta_a_archivo[estado_sel])
+# Campos de nombre municipio/estado
+mun_col = "mun_name" if "mun_name" in gdf_muns.columns else None
+if not mun_col:
+    # intenta inferir otra vez
+    for c in gdf_muns.columns:
+        if slug(c) in ("nomgeo","municipio","name","nombre"):
+            mun_col = c; break
+if not mun_col:
+    st.warning("No se encontró columna de nombre de municipio; se usará índice numérico.")
+    gdf_muns["mun_name"] = [f"Municipio {i}" for i in range(len(gdf_muns))]
+    mun_col = "mun_name"
 
-    # Selector de municipio por nombre (mun_name)
-    muns_ordenados = sorted(gdf_muns["mun_name"].astype(str).unique())
-    mun_sel = st.selectbox("Municipio", muns_ordenados, index=0)
+# Selección de municipio
+mun_list = sorted(list(gdf_muns[mun_col].astype(str).unique()))
+mun_sel = st.selectbox("Municipio", options=mun_list, index=0)
 
-    st.subheader("Estilo de resaltado")
-    lw_estado = st.slider("Grosor de contorno del estado", 1, 12, 3)
-    lw_mun = st.slider("Grosor del municipio", 1, 12, 3)
-    op_mun = st.slider("Opacidad del municipio", 0.10, 1.00, 0.6, step=0.05)
+# Figura
+bounds = gdf_muns.total_bounds  # [minx, miny, maxx, maxy]
+cx = (bounds[0]+bounds[2])/2
+cy = (bounds[1]+bounds[3])/2
+# zoom heurístico por extensión
+extent = max(bounds[2]-bounds[0], bounds[3]-bounds[1])
+if extent > 8:
+    zoom = 4.2
+elif extent > 5:
+    zoom = 5.0
+elif extent > 3:
+    zoom = 5.5
+elif extent > 2:
+    zoom = 6.0
+else:
+    zoom = 6.5
 
-with col_right:
-    st.subheader("Mapa")
+fig = go.Figure()
 
-    # GeoJSON de municipios
-    gj_muns = construir_geojson_from_gdf(gdf_muns)
-
-    # Índice del municipio seleccionado
-    mun_row = gdf_muns[gdf_muns["mun_name"].astype(str) == str(mun_sel)]
-    if mun_row.empty:
-        st.warning("No se encontró el municipio seleccionado en el archivo del estado.")
-        st.stop()
-    sel_id = int(mun_row.iloc[0]["mun_id"])
-
-    # Geometría del estado (unión de municipios) para contorno
-    try:
-        geom_estado = unary_union(gdf_muns.geometry)
-        gdf_estado = gpd.GeoDataFrame({"name": [estado_sel]}, geometry=[geom_estado], crs=gdf_muns.crs)
-        gdf_estado["eid"] = 0
-        gj_estado = json.loads(gdf_estado.to_json())
-    except Exception as e:
-        gj_estado = None
-
-    # Construir figura
-    fig = go.Figure()
-
-    # Capa 1: Contorno del estado (sin relleno, solo línea)
-    if gj_estado is not None:
+# 1) Contorno del estado con Scattermapbox (robusto)
+try:
+    geom_estado = unary_union(gdf_muns.geometry)
+    lons, lats = _boundary_coords(geom_estado)
+    if lons and lats:
         fig.add_trace(
-            go.Choroplethmapbox(
-                geojson=gj_estado,
-                featureidkey="properties.eid",
-                locations=[0],
-                z=[1],  # dummy
-                colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
-                showscale=False,
-                marker_line_width=lw_estado,
-                marker_line_color="black",
-                hovertemplate="<b>%{customdata}</b><extra></extra>",
-                customdata=[estado_sel],
-                opacity=0.01,  # casi transparente (sólo borde)
+            go.Scattermapbox(
+                lon=lons, lat=lats, mode="lines",
+                line=dict(width=lw_estado, color="black"),
+                hoverinfo="skip",
+                name=f"Contorno • {canon}",
             )
         )
+except Exception:
+    pass
 
-    # Capa 2: Municipios (todos) con baja opacidad (gris claro)
-    fig.add_trace(
-        go.Choroplethmapbox(
-            geojson=gj_muns,
-            featureidkey="properties.mun_id",
-            locations=gdf_muns["mun_id"],
-            z=[1] * len(gdf_muns),
-            colorscale=[[0, "#D3D3D3"], [1, "#D3D3D3"]],
-            showscale=False,
-            marker_line_width=0.5,
-            marker_line_color="#666",
-            hovertemplate="<b>%{customdata[0]}</b><br>CVE: %{customdata[1]}<extra></extra>",
-            customdata=list(zip(gdf_muns["mun_name"].astype(str), gdf_muns.get("mun_code", [""] * len(gdf_muns)).astype(str))),
-            opacity=0.35,
-        )
+# 2) Capa base: todos los municipios del estado (gris)
+# Para Choroplethmapbox, necesitamos 'locations' y 'featureidkey' que casen.
+# Usaremos el índice (creamos un id estable).
+gdf_muns = gdf_muns.reset_index(drop=True).copy()
+gdf_muns["__loc__"] = gdf_muns.index.astype(str)
+# exporta a geojson (en memoria)
+gj_muns = json.loads(gdf_muns.to_json())
+
+fig.add_trace(
+    go.Choroplethmapbox(
+        geojson=gj_muns,
+        featureidkey="properties.__loc__",
+        locations=gdf_muns["__loc__"],
+        z=[1]*len(gdf_muns),  # dummy
+        colorscale=[[0, "lightgray"], [1, "lightgray"]],
+        showscale=False,
+        marker_line_width=0.5,
+        marker_line_color="gray",
+        hoverinfo="skip",
+        name="Municipios",
+        opacity=0.35,
     )
+)
 
-    # Capa 3: Municipio seleccionado (color destacado)
-    fig.add_trace(
-        go.Choroplethmapbox(
-            geojson=gj_muns,
-            featureidkey="properties.mun_id",
-            locations=[sel_id],
-            z=[10],
-            colorscale=[[0, "#1f77b4"], [1, "#1f77b4"]],  # azul por defecto de Plotly
-            showscale=False,
-            marker_line_width=lw_mun,
-            marker_line_color="#1f77b4",
-            hovertemplate="<b>%{customdata[0]}</b><br>CVE: %{customdata[1]}<extra></extra>",
-            customdata=[(str(mun_row.iloc[0]['mun_name']), str(mun_row.iloc[0].get('mun_code', '')))],
-            opacity=op_mun,
-        )
+# 3) Municipio seleccionado (resaltado)
+sel = gdf_muns[gdf_muns[mun_col].astype(str) == str(mun_sel)].copy()
+if sel.empty:
+    st.error("No encontré el municipio seleccionado en el GeoDataFrame. Revisa nombres/acentos del archivo.")
+    st.stop()
+
+sel["__loc__"] = ["0"]  # una sola feature
+gj_sel = json.loads(sel.to_json())
+
+fig.add_trace(
+    go.Choroplethmapbox(
+        geojson=gj_sel,
+        featureidkey="properties.__loc__",
+        locations=sel["__loc__"],
+        z=[1],
+        colorscale=[[0, "royalblue"], [1, "royalblue"]],
+        showscale=False,
+        marker_line_width=lw_mun,
+        marker_line_color="navy",
+        hovertemplate=f"<b>{canon}</b><br>{mun_sel}<extra></extra>",
+        name=f"{mun_sel}",
+        opacity=op_mun,
     )
+)
 
-    # Centrar el mapa al estado (bounds)
-    try:
-        bounds = gdf_muns.total_bounds  # [minx, miny, maxx, maxy]
-        center_lon = float((bounds[0] + bounds[2]) / 2)
-        center_lat = float((bounds[1] + bounds[3]) / 2)
-        zoom_guess = 5  # ajustaremos un poco según tamaño del estado
-        # Heurística de zoom
-        dx = bounds[2] - bounds[0]
-        dy = bounds[3] - bounds[1]
-        span = max(dx, dy)
-        if span < 1.5:
-            zoom_guess = 7
-        if span < 1.0:
-            zoom_guess = 8
-        if span < 0.5:
-            zoom_guess = 9
-    except Exception:
-        center_lon, center_lat, zoom_guess = -102.0, 23.5, 4.2
+fig.update_layout(
+    mapbox_style="carto-positron",
+    mapbox_zoom=zoom,
+    mapbox_center={"lat": cy, "lon": cx},
+    margin=dict(l=0, r=0, t=0, b=0),
+    legend=dict(orientation="h", yanchor="bottom", y=0.01, xanchor="left", x=0.01),
+)
 
-    fig.update_layout(
-        mapbox_style="carto-positron",
-        mapbox_zoom=zoom_guess,
-        mapbox_center={"lon": center_lon, "lat": center_lat},
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=720,
-    )
+st.plotly_chart(fig, use_container_width=True)
 
-    st.plotly_chart(fig, use_container_width=True)
-
-# ---------- Panel de diagnóstico (opcional) ----------
-with st.expander("Ver diagnóstico de archivos / capas"):
+# ---------------------------
+# Diagnóstico opcional
+# ---------------------------
+with st.expander("Diagnóstico de archivos"):
     st.write({
-        "data_dir": str(DATA_DIR.resolve()),
-        "num_archivos_json": len(listar_archivos_estado(DATA_DIR)),
-        "estado_seleccionado": estado_sel,
-        "ruta_estado": str(etiqueta_a_archivo[estado_sel]),
-        "gdf_muns_shape": gdf_muns.shape,
-        "gdf_muns_columns": list(gdf_muns.columns),
-        "gdf_muns_crs": str(gdf_muns.crs),
+        "estado_seleccionado": canon,
+        "archivo_estado": state_path,
+        "filas": int(len(gdf_muns)),
+        "cols": list(gdf_muns.columns),
+        "geom_types": dict(gdf_muns.geom_type.value_counts()),
         "bounds[minx,miny,maxx,maxy]": list(map(float, gdf_muns.total_bounds)),
     })
