@@ -176,6 +176,16 @@ with st.sidebar.expander("Ver diagnóstico", expanded=False):
     gdf_summary("Estados", gdf_estados)
     gdf_summary("Municipios", gdf_muns)
 
+    # Chequeo extra: IDs que se usan en Plotly
+    try:
+        st.markdown("**IDs para Plotly (loc_id)**")
+        st.write({
+            "muns_in_count": len(gdf_muns_in),
+            "ejemplo_ids": list(gdf_muns_in.get("loc_id", pd.Series()).astype(str).head(5).values),
+        })
+    except Exception as e:
+        st.warning(f"No se pudo mostrar loc_id: {e}")
+
     st.caption("Si descargaste desde GitHub, asegúrate de guardar el **Raw** del GeoJSON, no el HTML de la página.")
 
 # Columnas de nombre
@@ -262,14 +272,27 @@ with left:
     gj_muns = json.loads(gdf_muns_in.to_json())
     gj_muni_sel = json.loads(gdf_muni_sel.to_json())
 
+    # Compatibilidad amplia con Plotly: mover el ID a feature.id para no depender de featureidkey
+    for feat in gj_muns.get("features", []):
+        props = feat.get("properties", {})
+        if props and "loc_id" in props:
+            feat["id"] = str(props["loc_id"])  # asegurar string
+    for feat in gj_muni_sel.get("features", []):
+        props = feat.get("properties", {})
+        if props and "loc_id" in props:
+            feat["id"] = str(props["loc_id"])  # asegurar string
+
+    # Preparar listas para locations
+    locs_all = gdf_muns_in["loc_id"].astype(str).tolist()
+    locs_sel = gdf_muni_sel["loc_id"].astype(str).tolist()
+
     # Figura base: todos los municipios (suave)
     fig = go.Figure()
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=gj_muns,
-            locations=gdf_muns_in["loc_id"],
-            z=[1] * len(gdf_muns_in),
-            featureidkey="properties.loc_id",
+            locations=locs_all,
+            z=[1] * len(locs_all),
             colorscale=[[0, "#e6e6e6"], [1, "#e6e6e6"]],
             marker_line_width=0.5,
             marker_line_color="#a3a3a3",
@@ -284,9 +307,8 @@ with left:
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=gj_muni_sel,
-            locations=gdf_muni_sel["loc_id"],
-            z=[1] * len(gdf_muni_sel),
-            featureidkey="properties.loc_id",
+            locations=locs_sel,
+            z=[1] * len(locs_sel),
             colorscale=[[0, "#ffcc00"], [1, "#ffcc00"]],
             marker_line_width=muni_line_width,
             marker_line_color="#000000",
