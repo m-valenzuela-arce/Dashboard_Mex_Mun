@@ -139,9 +139,48 @@ with st.spinner("Cargando estados y municipios..."):
     gdf_estados = load_geojson(Path(estados_path))
     gdf_muns = load_geojson(Path(muns_path))
 
+# -------------------------------
+# Diagnóstico rápido de archivos
+# -------------------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("Diagnóstico de archivos")
+with st.sidebar.expander("Ver diagnóstico", expanded=False):
+    def file_info(p: Path):
+        try:
+            size = p.stat().st_size if p.exists() else 0
+        except Exception:
+            size = 0
+        return {"ruta": str(p), "existe": p.exists(), "tam_bytes": size}
+
+    st.json({
+        "estados": file_info(Path(estados_path)),
+        "municipios": file_info(Path(muns_path)),
+    })
+
+    def gdf_summary(name: str, gdf: gpd.GeoDataFrame):
+        try:
+            geom_types = gdf.geometry.geom_type.value_counts().to_dict()
+            bounds = list(gdf.total_bounds)  # [minx, miny, maxx, maxy]
+            st.markdown(f"**{name}**")
+            st.write({
+                "CRS": str(gdf.crs),
+                "filas": len(gdf),
+                "columnas": list(gdf.columns),
+                "geom_types": geom_types,
+                "bounds[minx,miny,maxx,maxy]": bounds,
+            })
+            st.dataframe(gdf.head(5))
+        except Exception as e:
+            st.error(f"No se pudo resumir {name}: {e}")
+
+    gdf_summary("Estados", gdf_estados)
+    gdf_summary("Municipios", gdf_muns)
+
+    st.caption("Si descargaste desde GitHub, asegúrate de guardar el **Raw** del GeoJSON, no el HTML de la página.")
+
 # Columnas de nombre
-estado_col = guess_name_column(gdf_estados, ("NOM_ENT", "NOMGEO", "name", "Estado", "estado"))
-mun_col = guess_name_column(gdf_muns, ("NOM_MUN", "NOMGEO", "name", "Municipio", "municipio"))
+estado_col = guess_name_column(gdf_estados, ("state_name", "NOM_ENT", "NOMGEO", "name", "Estado", "estado"))
+mun_col = guess_name_column(gdf_muns, ("mun_name", "NOM_MUN", "NOMGEO", "name", "Municipio", "municipio"))
 
 # -------------------------------
 # UI: selectores
@@ -151,18 +190,26 @@ with right:
     st.header("Selecciona")
     estados_sorted = sorted(gdf_estados[estado_col].astype(str).unique())
     estado_sel = st.selectbox("Estado", estados_sorted, index=estados_sorted.index("Sonora") if "Sonora" in estados_sorted else 0)
-
-    # Filtrar municipios por estado mediante sjoin (geográfico)
-    estado_geom = gdf_estados.loc[gdf_estados[estado_col] == estado_sel, "geometry"].unary_union
-    # pequeño buffer para evitar problemas de topología al borde
-    try:
-        gdf_muns_in = gpd.sjoin(gdf_muns, gpd.GeoDataFrame(geometry=[estado_geom], crs=4326), predicate="intersects")
-    except Exception:
-        # fallback: filtro por bounding box para no fallar
-        gdf_muns_in = gdf_muns[gdf_muns.geometry.bounds.apply(
-            lambda r: estado_geom.bounds[0] <= r.minx <= estado_geom.bounds[2] and estado_geom.bounds[1] <= r.miny <= estado_geom.bounds[3],
-            axis=1,
-        )]
+    # Filtrar municipios por estado preferentemente por atributo (state_code) y si no, por sjoin
+    gdf_estado_sel = gdf_estados[gdf_estados[estado_col] == estado_sel]
+    gdf_muns_in = None
+    if "state_code" in gdf_estados.columns and "state_code" in gdf_muns.columns and len(gdf_estado_sel) > 0:
+        try:
+            state_code_sel = int(pd.to_numeric(gdf_estado_sel["state_code"].iloc[0], errors="coerce"))
+            gdf_muns_in = gdf_muns[pd.to_numeric(gdf_muns["state_code"], errors="coerce").astype("Int64") == state_code_sel]
+        except Exception:
+            gdf_muns_in = None
+    if gdf_muns_in is None or len(gdf_muns_in) == 0:
+        # Fallback geográfico
+        estado_geom = gdf_estado_sel.geometry.unary_union
+        try:
+            gdf_muns_in = gpd.sjoin(gdf_muns, gpd.GeoDataFrame(geometry=[estado_geom], crs=4326), predicate="intersects")
+        except Exception:
+            # Fallback por bbox
+            gdf_muns_in = gdf_muns[gdf_muns.geometry.bounds.apply(
+                lambda r: estado_geom.bounds[0] <= r.minx <= estado_geom.bounds[2] and estado_geom.bounds[1] <= r.miny <= estado_geom.bounds[3],
+                axis=1,
+            )]
 
     muns_sorted = sorted(gdf_muns_in[mun_col].astype(str).unique())
     if len(muns_sorted) == 0:
