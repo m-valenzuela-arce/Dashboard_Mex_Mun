@@ -1,366 +1,293 @@
+# app_mapa_mexico_estados_municipios.py
+# Streamlit + Plotly para mapa interactivo de México por estado (archivos por estado)
+# Coloca en ./data los archivos GeoJSON por estado con extensión .json (uno por estado):
+#   Aguascalientes.json, Baja California.json, ... , Yucatán.json, Zacatecas.json
+# El contenido puede llamarse .json aunque sea GeoJSON válido (FeatureCollection).
+#
+# Requisitos:
+#   pip install streamlit plotly geopandas shapely pyproj
+#
+# Ejecuta:
+#   streamlit run app_mapa_mexico_estados_municipios.py
+
 import json
+import os
+import unicodedata
 from pathlib import Path
 
 import geopandas as gpd
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import unary_union
 
-# -------------------------------
-# Configuración básica
-# -------------------------------
-st.set_page_config(page_title="Mapa de México (Estados y Municipios)", layout="wide")
-st.title("Mapa interactivo de México: Estados y Municipios")
-st.caption("Selecciona un estado y un municipio para resaltarlos en el mapa. Coloca los GeoJSON en ./data (se aceptan nombres: 'mx_estados.geojson'/'mx_municipios.geojson' o 'states.geojson'/'municipalities.geojson') o súbelos en la barra lateral.")
+# ---------- Configuración básica ----------
+st.set_page_config(page_title="Mapa Estados y Municipios (MX)", layout="wide")
+
+st.title("Mapa interactivo de México: Estados y Municipios (archivos por estado)")
+st.caption("Coloca tus archivos por estado (GeoJSON en formato .json) dentro de la carpeta `./data`.")
 
 DATA_DIR = Path("data")
-# Acepta nombres comunes: mx_estados.geojson / mx_municipios.geojson o states.geojson / municipalities.geojson
-ESTADOS_CANDIDATES = [
-    DATA_DIR / "mx_estados.geojson",
-    DATA_DIR / "states.geojson",
-]
-MUNS_CANDIDATES = [
-    DATA_DIR / "mx_municipios.geojson",
-    DATA_DIR / "municipalities.geojson",
-]
 
-def first_existing(paths):
-    for p in paths:
-        if p.exists():
-            return p
-    return None
-
-ESTADOS_FILE_DEFAULT = first_existing(ESTADOS_CANDIDATES)
-MUNS_FILE_DEFAULT = first_existing(MUNS_CANDIDATES)
-
-# -------------------------------
-# Utilidades
-# -------------------------------
+# ---------- Utilidades ----------
 
 @st.cache_data(show_spinner=False)
-def load_geojson(path: Path) -> gpd.GeoDataFrame:
-    gdf = gpd.read_file(path)
-    # Asegurar WGS84
-    if gdf.crs is None:
-        # Si no trae CRS, asumimos WGS84
-        gdf.set_crs(4326, inplace=True)
+def listar_archivos_estado(data_dir: Path):
+    """Devuelve dict {nombre_base_sin_ext: ruta} para todos los .json en data_dir."""
+    archivos = {}
+    if data_dir.exists():
+        for p in data_dir.glob("*.json"):
+            archivos[p.stem] = p
+    return archivos
+
+def normalizar(s: str) -> str:
+    """Normaliza texto para comparaciones robustas (quita acentos/espacios extras, minúsculas)."""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.lower().split())
+
+# Mapeo de nombres “comunes” -> nombre real del archivo (sin .json)
+# Lo que pediste: usar estos nombres cortos en el selector.
+NOMBRE_COMUN_A_ARCHIVO = {
+    "estado de mexico": "México",
+    "veracruz": "Veracruz de Ignacio de la Llave",
+    "michoacan": "Michoacán de Ocampo",
+    "ciudad de mexico": "Ciudad de México",
+    "coahuila": "Coahuila de Zaragoza",
+}
+
+# ---------- Carga de datos por estado ----------
+
+@st.cache_data(show_spinner=True)
+def cargar_municipios_estado(path_json: Path) -> gpd.GeoDataFrame:
+    """
+    Carga un GeoJSON (aunque su extensión sea .json) de municipios de un estado.
+    Asegura que existan columnas estandarizadas:
+      - 'mun_name' para el nombre del municipio
+      - 'mun_code' si existe código
+    Añade 'mun_id' (índice entero) para enlazar con Plotly.
+    """
+    # Algunos archivos pueden fallar con fiona si tienen CRSs raros; gpd.read_file suele manejarlo bien.
+    gdf = gpd.read_file(path_json)
+
+    # Detectar nombre de columna de municipio
+    posibles_nombres = ["NOMGEO", "mun_name", "NOM_MUN", "NOM_MPIO", "NOMBRE", "name"]
+    mun_col = None
+    for c in posibles_nombres:
+        if c in gdf.columns:
+            mun_col = c
+            break
+    if mun_col is None:
+        # Si no encontramos, crea una genérica
+        gdf["mun_name"] = gdf.index.astype(str)
+        mun_col = "mun_name"
     else:
-        gdf = gdf.to_crs(4326)
+        if mun_col != "mun_name":
+            gdf = gdf.rename(columns={mun_col: "mun_name"})
+
+    # Código de municipio (si existe)
+    posibles_cod = ["CVEGEO", "CVE_MUN", "clave", "code", "MUN", "MUN_CODE", "CVE_MPIO"]
+    for c in posibles_cod:
+        if c in gdf.columns:
+            gdf = gdf.rename(columns={c: "mun_code"})
+            break
+    if "mun_code" not in gdf.columns:
+        gdf["mun_code"] = None
+
+    # Asegurar CRS WGS84
+    try:
+        if gdf.crs is None:
+            # Asumimos WGS84 si viene vacío (muchos archivos de INEGI vienen así pero coords son lon/lat)
+            gdf.set_crs("EPSG:4326", inplace=True)
+        else:
+            gdf = gdf.to_crs("EPSG:4326")
+    except Exception:
+        # Si algo falla, seguimos sin reproyectar
+        pass
+
+    # ID único para plotly featureidkey
+    gdf = gdf.reset_index(drop=True)
+    gdf["mun_id"] = gdf.index.astype(int)
+
     return gdf
 
+def construir_geojson_from_gdf(gdf: gpd.GeoDataFrame) -> dict:
+    """Convierte el GeoDataFrame a dict GeoJSON con propiedades incluidas."""
+    gj = json.loads(gdf.to_json())
+    return gj
 
-def guess_name_column(gdf: gpd.GeoDataFrame, candidates=(
-    "NOMGEO", "NOM_ENT", "NOM_MUN", "nomgeo", "name", "NOMBRE", "Estado", "Municipio", "estado", "municipio",
-)) -> str:
-    """Intenta adivinar la columna de nombre más adecuada.
-    Retorna la primera candidata que exista; si no hay, intenta la primera columna de texto que no sea geometry.
-    """
-    for c in candidates:
-        if c in gdf.columns:
-            return c
-    # fallback: primera columna de tipo object con strings
-    for c in gdf.columns:
-        if c == "geometry":
-            continue
-        if pd.api.types.is_object_dtype(gdf[c]) or pd.api.types.is_string_dtype(gdf[c]):
-            return c
-    # última opción
-    return gdf.columns[0]
+# ---------- UI: selección de estado/municipio y estilos ----------
 
+col_left, col_right = st.columns([1, 3])
 
-def ensure_data():
-    """Obtiene rutas de archivos desde defaults o de uploads en la barra lateral."""
-    st.sidebar.subheader("Datos (GeoJSON)")
+with col_left:
+    st.subheader("Selecciona")
 
-    # Carga por defecto si existen
-    estados_path = ESTADOS_FILE_DEFAULT if ESTADOS_FILE_DEFAULT.exists() else None
-    muns_path = MUNS_FILE_DEFAULT if MUNS_FILE_DEFAULT.exists() else None
-
-    up_estados = st.sidebar.file_uploader("Subir GeoJSON de Estados", type=["json", "geojson"], key="estados")
-    up_muns = st.sidebar.file_uploader("Subir GeoJSON de Municipios", type=["json", "geojson"], key="muns")
-
-    if up_estados is not None:
-        estados_path = Path(st.session_state.get("_tmp_estados_path", "_estados_uploaded.geojson"))
-        with open(estados_path, "wb") as f:
-            f.write(up_estados.getvalue())
-        st.session_state["_tmp_estados_path"] = str(estados_path)
-
-    if up_muns is not None:
-        muns_path = Path(st.session_state.get("_tmp_muns_path", "_muns_uploaded.geojson"))
-        with open(muns_path, "wb") as f:
-            f.write(up_muns.getvalue())
-        st.session_state["_tmp_muns_path"] = str(muns_path)
-
-    if estados_path is None or muns_path is None:
-        with st.sidebar.expander("Instrucciones de datos", expanded=False):
-            st.markdown(
-                "- **Opción A (recomendada):** coloca `mx_estados.geojson` y `mx_municipios.geojson` dentro de la carpeta `./data` antes de ejecutar la app.\n"
-                "- **Opción B:** sube tus propios archivos GeoJSON arriba.\n"
-                "\nLos archivos deben estar en **WGS84 (EPSG:4326)** o tener CRS para reproyectar.")
-
-    return estados_path, muns_path
-
-
-def explode_exterior_coords(geom: Polygon | MultiPolygon):
-    """Devuelve listas de (lon, lat) para dibujar contornos con Scattermapbox.
-    Inserta `None` como separador entre anillos.
-    """
-    def _poly_coords(poly: Polygon):
-        x, y = poly.exterior.coords.xy
-        return list(x), list(y)
-
-    lons: list[float | None] = []
-    lats: list[float | None] = []
-
-    if isinstance(geom, Polygon):
-        xs, ys = _poly_coords(geom)
-        lons += xs + [None]
-        lats += ys + [None]
-    elif isinstance(geom, MultiPolygon):
-        for p in geom.geoms:
-            xs, ys = _poly_coords(p)
-            lons += xs + [None]
-            lats += ys + [None]
-    return lons, lats
-
-
-# -------------------------------
-# Carga de datos
-# -------------------------------
-estados_path, muns_path = ensure_data()
-
-if not estados_path or not muns_path or (not Path(estados_path).exists()) or (not Path(muns_path).exists()):
-    st.warning("⚠️ No se encontraron archivos GeoJSON. Coloca `mx_estados.geojson` y `mx_municipios.geojson` en ./data o súbelos en la barra lateral.")
-    st.stop()
-
-with st.spinner("Cargando estados y municipios..."):
-    gdf_estados = load_geojson(Path(estados_path))
-    gdf_muns = load_geojson(Path(muns_path))
-
-# -------------------------------
-# Diagnóstico rápido de archivos
-# -------------------------------
-st.sidebar.markdown("---")
-st.sidebar.subheader("Diagnóstico de archivos")
-with st.sidebar.expander("Ver diagnóstico", expanded=False):
-    def file_info(p: Path):
-        try:
-            size = p.stat().st_size if p.exists() else 0
-        except Exception:
-            size = 0
-        return {"ruta": str(p), "existe": p.exists(), "tam_bytes": size}
-
-    st.json({
-        "estados": file_info(Path(estados_path)),
-        "municipios": file_info(Path(muns_path)),
-    })
-
-    def gdf_summary(name: str, gdf: gpd.GeoDataFrame):
-        try:
-            geom_types = gdf.geometry.geom_type.value_counts().to_dict()
-            bounds = list(gdf.total_bounds)  # [minx, miny, maxx, maxy]
-            st.markdown(f"**{name}**")
-            st.write({
-                "CRS": str(gdf.crs),
-                "filas": len(gdf),
-                "columnas": list(gdf.columns),
-                "geom_types": geom_types,
-                "bounds[minx,miny,maxx,maxy]": bounds,
-            })
-            st.dataframe(gdf.head(5))
-        except Exception as e:
-            st.error(f"No se pudo resumir {name}: {e}")
-
-    gdf_summary("Estados", gdf_estados)
-    gdf_summary("Municipios", gdf_muns)
-
-    # Chequeo extra: IDs que se usan en Plotly
-    try:
-        st.markdown("**IDs para Plotly (loc_id)**")
-        st.write({
-            "muns_in_count": len(gdf_muns_in),
-            "ejemplo_ids": list(gdf_muns_in.get("loc_id", pd.Series()).astype(str).head(5).values),
-        })
-    except Exception as e:
-        st.warning(f"No se pudo mostrar loc_id: {e}")
-
-    st.caption("Si descargaste desde GitHub, asegúrate de guardar el **Raw** del GeoJSON, no el HTML de la página.")
-
-# Columnas de nombre
-estado_col = guess_name_column(gdf_estados, ("state_name", "NOM_ENT", "NOMGEO", "name", "Estado", "estado"))
-mun_col = guess_name_column(gdf_muns, ("mun_name", "NOM_MUN", "NOMGEO", "name", "Municipio", "municipio"))
-
-# -------------------------------
-# UI: selectores
-# -------------------------------
-left, right = st.columns([0.6, 0.4])
-with right:
-    st.header("Selecciona")
-    estados_sorted = sorted(gdf_estados[estado_col].astype(str).unique())
-    estado_sel = st.selectbox("Estado", estados_sorted, index=estados_sorted.index("Sonora") if "Sonora" in estados_sorted else 0)
-    # Filtrar municipios por estado preferentemente por atributo (state_code) y si no, por sjoin
-    gdf_estado_sel = gdf_estados[gdf_estados[estado_col] == estado_sel]
-    gdf_muns_in = None
-    if "state_code" in gdf_estados.columns and "state_code" in gdf_muns.columns and len(gdf_estado_sel) > 0:
-        try:
-            state_code_sel = int(pd.to_numeric(gdf_estado_sel["state_code"].iloc[0], errors="coerce"))
-            gdf_muns_in = gdf_muns[pd.to_numeric(gdf_muns["state_code"], errors="coerce").astype("Int64") == state_code_sel]
-        except Exception:
-            gdf_muns_in = None
-    if gdf_muns_in is None or len(gdf_muns_in) == 0:
-        # Fallback geográfico
-        estado_geom = gdf_estado_sel.geometry.unary_union
-        try:
-            gdf_muns_in = gpd.sjoin(gdf_muns, gpd.GeoDataFrame(geometry=[estado_geom], crs=4326), predicate="intersects")
-        except Exception:
-            # Fallback por bbox
-            gdf_muns_in = gdf_muns[gdf_muns.geometry.bounds.apply(
-                lambda r: estado_geom.bounds[0] <= r.minx <= estado_geom.bounds[2] and estado_geom.bounds[1] <= r.miny <= estado_geom.bounds[3],
-                axis=1,
-            )]
-
-    muns_sorted = sorted(gdf_muns_in[mun_col].astype(str).unique())
-    if len(muns_sorted) == 0:
-        st.error("No encontré municipios en el estado seleccionado. Revisa tus GeoJSON.")
+    archivos = listar_archivos_estado(DATA_DIR)
+    if not archivos:
+        st.error("No se encontraron archivos `.json` en `./data`. Coloca los 32 archivos por estado ahí.")
         st.stop()
 
-    mun_sel = st.selectbox("Municipio", muns_sorted)
+    # Construir lista de etiquetas de estados para selector:
+    #   - Si el archivo tiene un nombre mapeado -> mostrar el nombre común.
+    #   - Si no, mostrar el nombre del archivo tal cual (sin ext).
+    etiqueta_a_archivo = {}
+    usados = set()
+    # Primero agrega los mapeados (si existen en el directorio):
+    for comun_norm, archivo_base in NOMBRE_COMUN_A_ARCHIVO.items():
+        # Buscar la clave exacta que haya en archivos (case/acentos correctos):
+        # archivos keys are stems (with proper accents).
+        if archivo_base in archivos:
+            etiqueta = archivo_base  # etiqueta visible por defecto
+            # Cambiamos etiqueta visible al nombre "común" como pediste
+            if comun_norm == "estado de mexico":
+                etiqueta = "Estado de México"
+            elif comun_norm == "veracruz":
+                etiqueta = "Veracruz"
+            elif comun_norm == "michoacan":
+                etiqueta = "Michoacán"
+            elif comun_norm == "ciudad de mexico":
+                etiqueta = "Ciudad de México"
+            elif comun_norm == "coahuila":
+                etiqueta = "Coahuila"
+            etiqueta_a_archivo[etiqueta] = archivos[archivo_base]
+            usados.add(archivo_base)
 
-    # Controles de estilo
-    st.markdown("---")
+    # Luego agrega el resto de estados tal cual aparezcan
+    for stem, ruta in sorted(archivos.items()):
+        if stem not in usados:
+            etiqueta_a_archivo[stem] = ruta
+
+    opciones_estado = list(etiqueta_a_archivo.keys())
+
+    estado_sel = st.selectbox("Estado", opciones_estado, index=opciones_estado.index("Sonora") if "Sonora" in opciones_estado else 0)
+
+    # Cargar municipios del estado seleccionado
+    gdf_muns = cargar_municipios_estado(etiqueta_a_archivo[estado_sel])
+
+    # Selector de municipio por nombre (mun_name)
+    muns_ordenados = sorted(gdf_muns["mun_name"].astype(str).unique())
+    mun_sel = st.selectbox("Municipio", muns_ordenados, index=0)
+
     st.subheader("Estilo de resaltado")
-    estado_outline_width = st.slider("Grosor de contorno del estado", 1, 12, 5)
-    muni_line_width = st.slider("Grosor del municipio", 1, 12, 6)
-    muni_opacity = st.slider("Opacidad del municipio", 0.1, 1.0, 0.75)
+    lw_estado = st.slider("Grosor de contorno del estado", 1, 12, 3)
+    lw_mun = st.slider("Grosor del municipio", 1, 12, 3)
+    op_mun = st.slider("Opacidad del municipio", 0.10, 1.00, 0.6, step=0.05)
 
-with left:
-    st.header("Mapa")
+with col_right:
+    st.subheader("Mapa")
 
-    # Construcción de capas para el mapa
-    gdf_estado_sel = gdf_estados[gdf_estados[estado_col] == estado_sel]
-    gdf_muni_sel = gdf_muns_in[gdf_muns_in[mun_col] == mun_sel]
+    # GeoJSON de municipios
+    gj_muns = construir_geojson_from_gdf(gdf_muns)
 
-    # Centro y zoom aproximado
-    centroid = gdf_muni_sel.geometry.unary_union.centroid if not gdf_muni_sel.empty else gdf_estado_sel.geometry.unary_union.centroid
-    center = {"lat": centroid.y, "lon": centroid.x}
+    # Índice del municipio seleccionado
+    mun_row = gdf_muns[gdf_muns["mun_name"].astype(str) == str(mun_sel)]
+    if mun_row.empty:
+        st.warning("No se encontró el municipio seleccionado en el archivo del estado.")
+        st.stop()
+    sel_id = int(mun_row.iloc[0]["mun_id"])
 
-        # Preparar identificadores estables para Plotly (featureidkey)
-    def as_str(s):
-        try:
-            return s.astype("Int64").astype(str)
-        except Exception:
-            return s.astype(str)
+    # Geometría del estado (unión de municipios) para contorno
+    try:
+        geom_estado = unary_union(gdf_muns.geometry)
+        gdf_estado = gpd.GeoDataFrame({"name": [estado_sel]}, geometry=[geom_estado], crs=gdf_muns.crs)
+        gdf_estado["eid"] = 0
+        gj_estado = json.loads(gdf_estado.to_json())
+    except Exception as e:
+        gj_estado = None
 
-    gdf_muns_in = gdf_muns_in.copy()
-    gdf_muni_sel = gdf_muni_sel.copy()
-
-    # loc_id = state_code-mun_code (único por municipio en todo MX)
-    if "state_code" in gdf_muns_in.columns and "mun_code" in gdf_muns_in.columns:
-        gdf_muns_in["loc_id"] = as_str(gdf_muns_in["state_code"]) + "-" + as_str(gdf_muns_in["mun_code"]) 
-    else:
-        # fallback: usa índice (menos robusto)
-        gdf_muns_in["loc_id"] = gdf_muns_in.index.astype(str)
-
-    if "state_code" in gdf_muni_sel.columns and "mun_code" in gdf_muni_sel.columns:
-        gdf_muni_sel["loc_id"] = as_str(gdf_muni_sel["state_code"]) + "-" + as_str(gdf_muni_sel["mun_code"]) 
-    else:
-        gdf_muni_sel["loc_id"] = gdf_muni_sel.index.astype(str)
-
-    # GeoJSON (municipios del estado)
-    gj_muns = json.loads(gdf_muns_in.to_json())
-    gj_muni_sel = json.loads(gdf_muni_sel.to_json())
-
-    # Compatibilidad amplia con Plotly: mover el ID a feature.id para no depender de featureidkey
-    for feat in gj_muns.get("features", []):
-        props = feat.get("properties", {})
-        if props and "loc_id" in props:
-            feat["id"] = str(props["loc_id"])  # asegurar string
-    for feat in gj_muni_sel.get("features", []):
-        props = feat.get("properties", {})
-        if props and "loc_id" in props:
-            feat["id"] = str(props["loc_id"])  # asegurar string
-
-    # Preparar listas para locations
-    locs_all = gdf_muns_in["loc_id"].astype(str).tolist()
-    locs_sel = gdf_muni_sel["loc_id"].astype(str).tolist()
-
-    # Figura base: todos los municipios (suave)
+    # Construir figura
     fig = go.Figure()
+
+    # Capa 1: Contorno del estado (sin relleno, solo línea)
+    if gj_estado is not None:
+        fig.add_trace(
+            go.Choroplethmapbox(
+                geojson=gj_estado,
+                featureidkey="properties.eid",
+                locations=[0],
+                z=[1],  # dummy
+                colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+                showscale=False,
+                marker_line_width=lw_estado,
+                marker_line_color="black",
+                hovertemplate="<b>%{customdata}</b><extra></extra>",
+                customdata=[estado_sel],
+                opacity=0.01,  # casi transparente (sólo borde)
+            )
+        )
+
+    # Capa 2: Municipios (todos) con baja opacidad (gris claro)
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=gj_muns,
-            locations=locs_all,
-            z=[1] * len(locs_all),
-            colorscale=[[0, "#e6e6e6"], [1, "#e6e6e6"]],
-            marker_line_width=0.5,
-            marker_line_color="#a3a3a3",
+            featureidkey="properties.mun_id",
+            locations=gdf_muns["mun_id"],
+            z=[1] * len(gdf_muns),
+            colorscale=[[0, "#D3D3D3"], [1, "#D3D3D3"]],
             showscale=False,
-            hovertemplate=f"Municipio: %{{customdata[0]}}<extra></extra>",
-            customdata=gdf_muns_in[[mun_col]].astype(str).values,
-            opacity=0.6,
+            marker_line_width=0.5,
+            marker_line_color="#666",
+            hovertemplate="<b>%{customdata[0]}</b><br>CVE: %{customdata[1]}<extra></extra>",
+            customdata=list(zip(gdf_muns["mun_name"].astype(str), gdf_muns.get("mun_code", [""] * len(gdf_muns)).astype(str))),
+            opacity=0.35,
         )
     )
 
-    # Capa de municipio seleccionado (resaltado)
+    # Capa 3: Municipio seleccionado (color destacado)
     fig.add_trace(
         go.Choroplethmapbox(
-            geojson=gj_muni_sel,
-            locations=locs_sel,
-            z=[1] * len(locs_sel),
-            colorscale=[[0, "#ffcc00"], [1, "#ffcc00"]],
-            marker_line_width=muni_line_width,
-            marker_line_color="#000000",
+            geojson=gj_muns,
+            featureidkey="properties.mun_id",
+            locations=[sel_id],
+            z=[10],
+            colorscale=[[0, "#1f77b4"], [1, "#1f77b4"]],  # azul por defecto de Plotly
             showscale=False,
-            hovertemplate=f"Municipio seleccionado: %{{customdata[0]}}<extra></extra>",
-            customdata=gdf_muni_sel[[mun_col]].astype(str).values,
-            opacity=muni_opacity,
+            marker_line_width=lw_mun,
+            marker_line_color="#1f77b4",
+            hovertemplate="<b>%{customdata[0]}</b><br>CVE: %{customdata[1]}<extra></extra>",
+            customdata=[(str(mun_row.iloc[0]['mun_name']), str(mun_row.iloc[0].get('mun_code', '')))],
+            opacity=op_mun,
         )
     )
 
-    # Contorno del estado
-    estado_union = unary_union(gdf_estado_sel.geometry)
-    lons, lats = explode_exterior_coords(estado_union)
-    fig.add_trace(
-        go.Scattermapbox(
-            lon=lons,
-            lat=lats,
-            mode="lines",
-            line=dict(width=estado_outline_width, color="#111111"),
-            name="Contorno estado",
-            hoverinfo="skip",
-        )
-    )
+    # Centrar el mapa al estado (bounds)
+    try:
+        bounds = gdf_muns.total_bounds  # [minx, miny, maxx, maxy]
+        center_lon = float((bounds[0] + bounds[2]) / 2)
+        center_lat = float((bounds[1] + bounds[3]) / 2)
+        zoom_guess = 5  # ajustaremos un poco según tamaño del estado
+        # Heurística de zoom
+        dx = bounds[2] - bounds[0]
+        dy = bounds[3] - bounds[1]
+        span = max(dx, dy)
+        if span < 1.5:
+            zoom_guess = 7
+        if span < 1.0:
+            zoom_guess = 8
+        if span < 0.5:
+            zoom_guess = 9
+    except Exception:
+        center_lon, center_lat, zoom_guess = -102.0, 23.5, 4.2
 
     fig.update_layout(
         mapbox_style="carto-positron",
-        mapbox_zoom=7.2,
-        mapbox_center=center,
+        mapbox_zoom=zoom_guess,
+        mapbox_center={"lon": center_lon, "lat": center_lat},
         margin=dict(l=0, r=0, t=0, b=0),
         height=720,
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------------
-# Notas/ayuda
-# -------------------------------
-with st.expander("Ayuda y notas"):
-    st.markdown(
-        """
-        **Formato esperado de los datos**
-        - GeoJSON de **estados** y **municipios** en **EPSG:4326 (WGS84)**.
-        - La app intenta detectar automáticamente las columnas de **nombre** (por ejemplo `NOM_ENT` para estados y `NOM_MUN` para municipios). Si tus archivos usan otros nombres, igual intentará adivinar; si no, renombra esas columnas.
-
-        **Cómo preparar los datos**
-        1. Crea una carpeta `data/` junto a este archivo.
-        2. Coloca ahí `mx_estados.geojson` y `mx_municipios.geojson` (o usa el cargador de archivos en la barra lateral).
-
-        **Personalización visual**
-        - En la derecha puedes ajustar el grosor del contorno del estado y del municipio, así como la opacidad del municipio seleccionado.
-
-        **Tip**
-        - Si el *spatial join* falla por topología en tus datos, el código usa un *fallback* por *bounding box* para no romper la app. Idealmente, usa geometrías válidas y limpias.
-        """
-    )
+# ---------- Panel de diagnóstico (opcional) ----------
+with st.expander("Ver diagnóstico de archivos / capas"):
+    st.write({
+        "data_dir": str(DATA_DIR.resolve()),
+        "num_archivos_json": len(listar_archivos_estado(DATA_DIR)),
+        "estado_seleccionado": estado_sel,
+        "ruta_estado": str(etiqueta_a_archivo[estado_sel]),
+        "gdf_muns_shape": gdf_muns.shape,
+        "gdf_muns_columns": list(gdf_muns.columns),
+        "gdf_muns_crs": str(gdf_muns.crs),
+        "bounds[minx,miny,maxx,maxy]": list(map(float, gdf_muns.total_bounds)),
+    })
