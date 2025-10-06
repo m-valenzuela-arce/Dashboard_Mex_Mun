@@ -3,7 +3,7 @@ import json
 import streamlit as st
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Mapa MX: Estados y Municipios (robusto)", layout="wide")
+st.set_page_config(page_title="Mapa MX: Estados y Municipios", layout="wide")
 
 DATA_DIR = "data"
 
@@ -49,7 +49,7 @@ def fc_bounds(fc):
     maxx=maxy=-1e12
     for feat in fc.get("features", []):
         b = feature_bounds(feat)
-        if not b: 
+        if not b:
             continue
         x0,y0,x1,y1 = b
         minx=min(minx,x0); miny=min(miny,y0)
@@ -123,7 +123,6 @@ def feat_mun_name(feat):
     return "Municipio"
 
 def extract_single_feature_geojson(feat):
-    """Devuelve un FeatureCollection con solo 'feat' (para descargar)."""
     return {
         "type": "FeatureCollection",
         "name": feat_label(feat),
@@ -131,37 +130,38 @@ def extract_single_feature_geojson(feat):
     }
 
 # ---------------------------
-# Sidebar: selección + controles
+# UI (solo selección simple)
 # ---------------------------
-st.sidebar.title("Controles")
+st.title("Mapa interactivo de México: Estados y Municipios")
+st.caption("Coloca archivos por-estado en ./data (JSON/GeoJSON con polígonos municipales).")
 
 files = list_state_files()
 if not files:
-    st.sidebar.error("No encontré archivos .json/.geojson en ./data")
+    st.error("No encontré archivos .json/.geojson en ./data")
     st.stop()
 
-estado_sel = st.sidebar.selectbox("Estado (archivo):", list(files.keys()))
+col1, col2 = st.columns(2)
+with col1:
+    estado_sel = st.selectbox("Estado (archivo):", list(files.keys()))
 gj = load_geojson(files[estado_sel])
 
-# Build lista de municipios
+# Lista de municipios
 mun_names = []
 for f in gj.get("features", []):
     mun_names.append(feat_mun_name(f))
 mun_names = sorted(set(mun_names)) or ["(Sin municipios detectados)"]
-mun_sel = st.sidebar.selectbox("Municipio:", mun_names, index=0)
+with col2:
+    mun_sel = st.selectbox("Municipio:", mun_names, index=0)
 
-# Controles visuales
-st.sidebar.markdown("### Apariencia")
-op_all = st.sidebar.slider("Opacidad base (todos)", 0.1, 1.0, 0.45, 0.05)
-op_sel = st.sidebar.slider("Opacidad selección", 0.1, 1.0, 0.65, 0.05)
-lw_all = st.sidebar.slider("Grosor base", 0, 6, 1)
-lw_sel = st.sidebar.slider("Grosor selección", 0, 10, 3)
-show_hover = st.sidebar.checkbox("Mostrar tooltips", value=True)
-
-reset_clicked = st.sidebar.button("Reset vista")
+# Valores fijos (según tu solicitud)
+OP_BASE = 0.5      # Opacidad base (todos)
+OP_SEL  = 0.5      # Opacidad selección
+LW_BASE = 1        # Grosor base
+LW_SEL  = 1        # Grosor selección
+SHOW_HOVER = True  # tooltips activados
 
 # ---------------------------
-# Calcular vista (state o municipio)
+# Calcular vista
 # ---------------------------
 b_state = fc_bounds(gj)
 if b_state:
@@ -171,7 +171,6 @@ if b_state:
 else:
     cx_state, cy_state, zoom_state = -102.3, 22.0, 6.0
 
-# bounds del municipio seleccionado (si existe)
 sel_feat = None
 for f in gj.get("features", []):
     if feat_mun_name(f) == mun_sel:
@@ -179,46 +178,41 @@ for f in gj.get("features", []):
         break
 
 if sel_feat:
-    b_sel = feature_bounds(sel_feat)
-else:
-    b_sel = None
-
-if reset_clicked or not b_sel:
-    cx, cy, zoom = cx_state, cy_state, zoom_state
-else:
-    x0,y0,x1,y1 = b_sel
+    x0,y0,x1,y1 = feature_bounds(sel_feat)
     cx, cy = (x0+x1)/2.0, (y0+y1)/2.0
     zoom = pick_zoom(x0, y0, x1, y1)
+else:
+    cx, cy, zoom = cx_state, cy_state, zoom_state
 
 # ---------------------------
 # Construir figura
 # ---------------------------
 fig = go.Figure()
 
-# 1) Todos los municipios en gris (debajo)
+# 1) Todos los municipios (gris)
 for f in gj.get("features", []):
     add_feature(
         fig, f,
         name="Municipio",
-        fill_opacity=op_all,
-        line_w=lw_all,
+        fill_opacity=OP_BASE,
+        line_w=LW_BASE,
         line_c="gray",
         fill_c="lightgray",
         hovertext=feat_label(f),
-        show_hover=show_hover
+        show_hover=SHOW_HOVER
     )
 
-# 2) Municipio seleccionado en azul (encima)
+# 2) Municipio seleccionado (azul)
 if sel_feat:
     add_feature(
         fig, sel_feat,
         name=f"Seleccionado: {feat_mun_name(sel_feat)}",
-        fill_opacity=op_sel,
-        line_w=lw_sel,
+        fill_opacity=OP_SEL,
+        line_w=LW_SEL,
         line_c="navy",
         fill_c="royalblue",
         hovertext=feat_label(sel_feat),
-        show_hover=show_hover
+        show_hover=SHOW_HOVER
     )
 
 fig.update_layout(
@@ -229,9 +223,6 @@ fig.update_layout(
     height=740,
     showlegend=False
 )
-
-st.title("Mapa interactivo de México: Estados y Municipios")
-st.caption("Coloca archivos por-estado en ./data (JSON/GeoJSON con polígonos municipales).")
 
 st.plotly_chart(
     fig,
